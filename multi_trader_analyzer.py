@@ -8,10 +8,30 @@ import re
 def extract_root_symbol(symbol):
     return re.sub(r'\d+[A-Za-z]*$', '', symbol)
 
+# Function to clean and convert pnl values
+def clean_pnl(pnl):
+    if isinstance(pnl, str):
+        # Remove $ and commas
+        pnl = pnl.replace('$', '').replace(',', '')
+        # Check if the value is in parentheses (negative)
+        if '(' in pnl and ')' in pnl:
+            pnl = pnl.replace('(', '').replace(')', '')
+            return -float(pnl)
+        return float(pnl)
+    return pnl
+
 # Function to analyze a single trader's CSV
 def analyze_trader(trades):
     # Extract root symbol
     trades['Root Symbol'] = trades['symbol'].apply(extract_root_symbol)
+    
+    # Clean pnl column
+    trades['pnl'] = trades['pnl'].apply(clean_pnl)
+    
+    # Calculate account age (in days)
+    first_trade_date = trades['boughtTimestamp'].min()
+    last_trade_date = trades['boughtTimestamp'].max()
+    account_age = (last_trade_date - first_trade_date).days
     
     # Calculate metrics
     metrics = {
@@ -19,7 +39,8 @@ def analyze_trader(trades):
         'Avg Win per Asset': trades[trades['pnl'] > 0].groupby('Root Symbol')['pnl'].mean().to_dict(),
         'Avg Size per Trade per Asset': trades.groupby('Root Symbol')['qty'].mean().to_dict(),
         'Winning Days': trades[trades['pnl'] > 0].groupby(trades['boughtTimestamp'].dt.date)['pnl'].sum().mean(),
-        'Losing Days': trades[trades['pnl'] < 0].groupby(trades['boughtTimestamp'].dt.date)['pnl'].sum().mean()
+        'Losing Days': trades[trades['pnl'] < 0].groupby(trades['boughtTimestamp'].dt.date)['pnl'].sum().mean(),
+        'Account Age': account_age
     }
     return metrics
 
@@ -37,9 +58,6 @@ def main():
                 # Load CSV
                 trades = pd.read_csv(uploaded_file, parse_dates=['boughtTimestamp', 'soldTimestamp'])
                 
-                # Clean pnl column (remove $ and commas)
-                trades['pnl'] = trades['pnl'].replace('[\$,]', '', regex=True).astype(float)
-                
                 # Analyze trader
                 metrics = analyze_trader(trades)
                 all_metrics.append(metrics)
@@ -53,7 +71,8 @@ def main():
                 'Avg Win per Asset': {},
                 'Avg Size per Trade per Asset': {},
                 'Avg Winning Days': np.mean([m['Winning Days'] for m in all_metrics if not np.isnan(m['Winning Days'])]),
-                'Avg Losing Days': np.mean([m['Losing Days'] for m in all_metrics if not np.isnan(m['Losing Days'])])
+                'Avg Losing Days': np.mean([m['Losing Days'] for m in all_metrics if not np.isnan(m['Losing Days'])]),
+                'Avg Account Age': np.mean([m['Account Age'] for m in all_metrics])
             }
             
             # Combine metrics for each asset
@@ -103,6 +122,10 @@ def main():
             st.subheader("Average Winning and Losing Days")
             st.write(f"**Avg Winning Days**: ${aggregated['Avg Winning Days']:.2f}")
             st.write(f"**Avg Losing Days**: ${aggregated['Avg Losing Days']:.2f}")
+            
+            # Avg Account Age
+            st.subheader("Average Account Age")
+            st.write(f"**Avg Account Age**: {aggregated['Avg Account Age']:.2f} days")
 
 # Run the app
 if __name__ == "__main__":
