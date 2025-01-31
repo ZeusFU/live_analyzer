@@ -16,8 +16,9 @@ def analyze_trader(file, min_days=7, daily_threshold=0.04, total_threshold=0.5):
         df['pnl'] = df['pnl'].str.replace('[$,()]', '', regex=True).astype(float)
         df['soldDate'] = pd.to_datetime(df['soldTimestamp']).dt.date
         
-        # Estimate starting balance (max of first 5 positions)
-        initial_balance = (df.head(5)['qty'] * df.head(5)['buyPrice']).max()
+        # Estimate starting balance (max position size)
+        df['position_size'] = df['qty'] * df['buyPrice']
+        initial_balance = df['position_size'].max()
         
         # Daily performance analysis
         daily = df.groupby('soldDate').agg(
@@ -26,29 +27,35 @@ def analyze_trader(file, min_days=7, daily_threshold=0.04, total_threshold=0.5):
         ).reset_index()
         
         # Calculate qualification metrics
-        daily['met_daily_target'] = daily['daily_pnl'] >= initial_balance * daily_threshold
-        valid_days = daily[daily['met_daily_target']]
-        total_profit = daily['daily_pnl'].sum()
+        required_daily_profit = initial_balance * daily_threshold
+        daily['met_target'] = daily['daily_pnl'] >= required_daily_profit
+        valid_days = daily[daily['met_target']]
         
+        total_profit = daily['daily_pnl'].sum()
         qualifies = (
             len(valid_days) >= min_days and 
             total_profit >= initial_balance * total_threshold
         )
         
-        # Calculate potential company liability
-        bonus_amount = total_profit * st.session_state.bonus_pct / 100 if qualifies else 0
-        company_profit_share = total_profit * 0.10  # 10% withdrawal fee
-        net_cost = bonus_amount - company_profit_share
-        
+        # Calculate company exposure
+        if qualifies:
+            bonus_amount = total_profit * (st.session_state.bonus_pct / 100)
+            company_profit_share = total_profit * 0.10  # 10% of total profits
+            net_cost = bonus_amount - company_profit_share
+        else:
+            bonus_amount = 0
+            company_profit_share = 0
+            net_cost = 0
+            
         return {
             'trader': file.name.split('.')[0],
             'initial_balance': initial_balance,
             'qualifies': qualifies,
-            'valid_days': len(valid_days),
             'total_profit': total_profit,
             'bonus_cost': bonus_amount,
-            'net_cost': max(net_cost, 0),  # Can't have negative cost
-            'company_profit': company_profit_share
+            'company_profit': company_profit_share,
+            'net_cost': net_cost,
+            'roi': (company_profit_share - bonus_amount) / initial_balance * 100
         }
     
     except Exception as e:
@@ -81,43 +88,45 @@ if uploaded_files:
     
     if results:
         df = pd.DataFrame(results)
-        total_risk = df['bonus_cost'].sum()
-        total_profit_share = df['company_profit'].sum()
-        net_company_cost = total_risk - total_profit_share
+        qualified = df[df['qualifies']]
         
         # Key metrics
+        total_bonus = qualified['bonus_cost'].sum()
+        total_profit_share = qualified['company_profit'].sum()
+        net_exposure = total_bonus - total_profit_share
+        avg_roi = qualified['roi'].mean()
+
+        # Display metrics
         col1, col2, col3 = st.columns(3)
-        col1.metric("Qualifying Traders", f"{df['qualifies'].sum()}/{len(df)}")
-        col2.metric("Total Bonus Risk", f"${total_risk:,.0f}")
-        col3.metric("Net Company Cost", f"${net_company_cost:,.0f}", 
-                   delta_color="inverse" if net_company_cost > 0 else "normal")
-        
-        # Risk distribution analysis
-        st.subheader("Risk Distribution Across Account Sizes")
-        fig = px.scatter(df[df['qualifies']], 
-                        x='initial_balance', y='bonus_cost',
-                        color='valid_days', size='total_profit',
+        col1.metric("Qualifying Traders", f"{len(qualified)}/{len(df)}")
+        col2.metric("Total Bonus Liability", f"${total_bonus:,.0f}")
+        col3.metric("Net Company Exposure", f"${net_exposure:,.0f}", 
+                   delta_color="inverse" if net_exposure > 0 else "normal",
+                   help="Negative values = Net Profit for Company")
+
+        # Risk analysis
+        st.subheader("Exposure Distribution")
+        fig = px.histogram(qualified, x='net_cost', 
+                          nbins=20,
+                          labels={'net_cost': 'Net Cost per Trader'},
+                          title="Distribution of Net Company Exposure per Qualifying Trader")
+        st.plotly_chart(fig, use_container_width=True)
+
+        # ROI analysis
+        st.subheader("Return on Investment")
+        fig = px.scatter(qualified, x='initial_balance', y='roi',
+                        color='net_cost',
+                        size='total_profit',
                         labels={'initial_balance': 'Account Size',
-                                'bonus_cost': 'Potential Bonus Cost'},
-                        hover_data=['trader'])
+                                'roi': 'ROI (%)'},
+                        title="Company ROI by Account Size")
         st.plotly_chart(fig, use_container_width=True)
-        
-        # Cost breakdown
-        st.subheader("Cost Composition")
-        cost_df = pd.DataFrame({
-            'Type': ['Total Bonuses', 'Company Profit Share', 'Net Cost'],
-            'Amount': [total_risk, total_profit_share, net_company_cost]
-        })
-        fig = px.bar(cost_df, x='Type', y='Amount', text='Amount',
-                    labels={'Amount': 'USD'})
-        fig.update_traces(texttemplate='$%{y:,.0f}')
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Downloadable results
+
+        # Download results
         csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-            label="Download Full Analysis",
+            "Download Full Analysis",
             data=csv,
-            file_name='bonus_risk_analysis.csv',
+            file_name='risk_analysis.csv',
             mime='text/csv'
         )
